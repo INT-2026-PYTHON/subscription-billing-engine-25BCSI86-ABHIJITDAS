@@ -39,4 +39,83 @@ def build_invoice(
 ) -> Invoice:
     """Pure function. Returns an Invoice (id=None, status=DRAFT) ready to be persisted."""
     # TODO Day 2
-    raise NotImplementedError("Day 2: implement build_invoice")
+    def build_invoice(
+    subscription: Subscription,
+    plan: Plan,
+    strategy: PricingStrategy,
+    discount: Optional[Discount],
+    tax_calc: TaxCalculator,
+    tax_context: TaxContext,
+    usage_quantity: int,
+    period_start: date,
+    period_end: date,
+    invoice_count_so_far: int,
+) -> Invoice:
+    # 1. Base charge
+    subtotal = strategy.calculate(usage_quantity)
+
+    line_items: list[InvoiceLineItem] = [
+        InvoiceLineItem(
+            id=None,
+            invoice_id=None,
+            description=f"{plan.name} charge",
+            amount=subtotal,
+            kind=LineItemKind.BASE,
+        )
+    ]
+
+    # 2. Discount
+    if discount:
+        discount_total = discount.apply(
+            subtotal,
+            DiscountContext(invoice_count_so_far=invoice_count_so_far),
+        )
+    else:
+        discount_total = Money.zero(subtotal.currency)
+
+    if not discount_total.is_zero():
+        line_items.append(
+            InvoiceLineItem(
+                id=None,
+                invoice_id=None,
+                description="Discount",
+                amount=-discount_total,
+                kind=LineItemKind.DISCOUNT,
+            )
+        )
+
+    # 3. Taxable amount
+    taxable = subtotal - discount_total
+
+    # 4. Tax
+    tax_breakdown = tax_calc.apply(taxable, tax_context)
+    tax_total = tax_breakdown.total
+
+    for description, amount in tax_breakdown.components:
+        line_items.append(
+            InvoiceLineItem(
+                id=None,
+                invoice_id=None,
+                description=description,
+                amount=amount,
+                kind=LineItemKind.TAX,
+            )
+        )
+
+    # 5. Total
+    total = taxable + tax_total
+
+    return Invoice(
+        id=None,
+        subscription_id=subscription.id,
+        period_start=period_start,
+        period_end=period_end,
+        subtotal=subtotal,
+        discount_total=discount_total,
+        tax_total=tax_total,
+        total=total,
+        status=InvoiceStatus.DRAFT,
+        issued_at=None,
+        pdf_path=None,
+        line_items=line_items,
+    )
