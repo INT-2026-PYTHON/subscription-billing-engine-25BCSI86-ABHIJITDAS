@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from typing import Callable, Optional
+from billing_engine.money import Money
+from billing_engine.billing.proration import compute_proration
 
 from billing_engine.db import (
     Database,
@@ -15,7 +17,15 @@ from billing_engine.db import (
     UsageRecordRepository, InvoiceRepository, InvoiceLineItemRepository,
     LedgerRepository,
 )
-from billing_engine.models import Subscription
+from billing_engine.models import (
+    Subscription,
+    Invoice,
+    InvoiceStatus,
+    InvoiceLineItem,
+    LineItemKind,
+    LedgerEntry,
+    LedgerDirection,
+)
 
 
 @dataclass
@@ -164,8 +174,112 @@ class BillingCycle:
         invoices_skipped_duplicate=invoices_skipped_duplicate,
         trials_activated=trials_activated,
     )
-    # --------------------------------------------------------
-    def upgrade_subscription(self, subscription_id: int, new_plan_id: int, switch_date: date) -> None:
-        """Mid-cycle upgrade — Day 4 stretch."""
-        # TODO Day 4
-        raise NotImplementedError("Day 4: implement BillingCycle.upgrade_subscription")
+        
+  def upgrade_subscription(
+    self,
+    subscription_id: int,
+    new_plan_id: int,
+    switch_date: date,
+) -> None:
+    """Mid-cycle upgrade — Day 4 stretch."""
+
+    from billing_engine.billing.proration import compute_proration
+    from billing_engine.money import Money
+    from billing_engine.models import (
+        Invoice,
+        InvoiceStatus,
+        InvoiceLineItem,
+        LineItemKind,
+        LedgerEntry,
+        LedgerDirection,
+    )
+
+    sub = self.subscription_repo.get(subscription_id)
+    if sub is None:
+        raise ValueError(f"Subscription {subscription_id} not found")
+
+    old_plan = self.plan_repo.get(sub.plan_id)
+    new_plan = self.plan_repo.get(new_plan_id)
+
+    if old_plan is None:
+        raise ValueError(f"Plan {sub.plan_id} not found")
+
+    if new_plan is None:
+        raise ValueError(f"Plan {new_plan_id} not found")
+
+    customer = self.customer_repo.get(sub.customer_id)
+    if customer is None:
+        raise ValueError(f"Customer {sub.customer_id} not found")
+
+    old_strategy = self.strategy_factory(old_plan)
+    new_strategy = self.strategy_factory(new_plan)
+
+    old_price = old_strategy.calculate(0)
+    new_price = new_strategy.calculate(0)
+
+    tax_calc, tax_context = self.tax_factory(customer)
+
+    pr = compute_proration(
+        old_plan_price=old_price,
+        new_plan_price=new_price,
+        period_start=sub.current_period_start,
+        period_end=sub.current_period_end,
+        switch_date=switch_date,
+        tax_calc=tax_calc,
+        tax_context=tax_context,
+    )
+
+    subtotal = pr.charge_amount - pr.credit_amount
+    tax_total = pr.charge_tax - pr.credit_tax
+    total = subtotal + tax_total
+
+    invoice = self.invoice_repo.add(
+        Invoice(
+            id=None,
+            subscription_id=sub.id,
+            period_start=switch_date,
+            period_end=sub.current_period_end,
+            subtotal=subtotal,
+            discount_total=Money.zero(total.currency),
+            tax_total=tax_total,
+            total=total,
+            status=InvoiceStatus.ISSUED,
+            line_items=[],
+        )
+    )
+
+    self.line_item_repo.add(
+        InvoiceLineItem(
+            id=None,
+            invoice_id=invoice.id,
+            description="Proration credit",
+            amount=-pr.credit_amount,
+            kind=LineItemKind.PRORATION_CREDIT,
+        )
+    )
+
+    self.line_item_repo.add(
+        InvoiceLineItem(
+            id=None,
+            invoice_id=invoice.id,
+            description="Proration charge",
+            amount=pr.charge_amount,
+            kind=LineItemKind.PRORATION_CHARGE,
+        )
+    )
+
+    self.ledger_repo.add(
+        LedgerEntry(
+            id=None,
+            invoice_id=invoice.id,
+            customer_id=customer.id,
+            amount=total,
+            direction=LedgerDirection.DEBIT,
+            reason=f"Proration upgrade subscription {sub.id}",
+        )
+    )
+
+    self.subscription_repo.update_plan(
+        subscription_id,
+        new_plan_id,
+    )

@@ -460,9 +460,19 @@ class SubscriptionRepository:
                 ),
             )
 
-    def update_plan(self, subscription_id: int, new_plan_id: int) -> None:
-        """Switch the subscription to a different plan (used by upgrade flow)."""
-        raise NotImplementedError("Day 4: implement SubscriptionRepository.update_plan")
+  def update_plan(self, subscription_id: int, new_plan_id: int) -> None:
+    with self.db.connect() as conn:
+        conn.execute(
+            """
+            UPDATE subscriptions
+            SET plan_id = ?
+            WHERE id = ?
+            """,
+            (
+                new_plan_id,
+                subscription_id,
+            ),
+        )
 # ============================================================
 # USAGE
 # ============================================================
